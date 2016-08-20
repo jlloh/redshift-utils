@@ -10,19 +10,26 @@ distkeyname = 'driver_id'
 
 #---------------------------------------------------
 
-config=ConfigParser.RawConfigParser()
+config = ConfigParser.RawConfigParser()
 config.read(os.path.expanduser('~/.config.cfg'))
   
-username=config.get('main_cluster','user')
-password=config.get('main_cluster','password')
-dbname=config.get('main_cluster','database')
-host=config.get('main_cluster','host')
-port=config.get('main_cluster','port')
+username = config.get('main_cluster','user')
+password = config.get('main_cluster','password')
+dbname = config.get('main_cluster','database')
+host = config.get('main_cluster','host')
+port = config.get('main_cluster','port')
 
-con=psycopg2.connect(dbname=dbname,user=username,host=host
+parameters = dict()
+
+#s3 credentials
+parameters['bucket_name'] = config.get('s3','bucket')
+parameters['access_key_id'] = config.get('s3','aws_access_key_id')
+parameters['secret_access_key'] = config.get('s3','aws_secret_access_key')
+
+con = psycopg2.connect(dbname=dbname,user=username,host=host
                     ,password=password,port=port)
                     
-cur=con.cursor()
+cur = con.cursor()
                     
 query = '''
 SET SEARCH_PATH TO %(schema)s;
@@ -31,7 +38,8 @@ SELECT "column", "type", encoding, distkey, sortkey, "notnull"
  WHERE tablename = %(tablename)s;
 '''
 
-parameters = {'schema': schema,'tablename': tablename}
+parameters['schema'] = schema
+parameters['tablename'] = tablename
 
 cur.execute(query,parameters)
 
@@ -98,8 +106,8 @@ for row in cur.fetchall():
 
 parameters['selectusers'] = ','.join(selectusers)
 parameters['insertusers'] = ','.join(insertusers)
-grantselect = '\nGRANT SELECT ON %(tablename)s to %(selectusers)s;'%parameters
-grantinsert = '\nGRANT INSERT ON %(tablename)s to %(insertusers)s;'%parameters
+grantselect = '\nGRANT SELECT ON %(tablename)s_temp to %(selectusers)s;'%parameters
+grantinsert = '\nGRANT INSERT ON %(tablename)s_temp to %(insertusers)s;'%parameters
 ddl+=grantselect+grantinsert
 
 print ddl
@@ -120,6 +128,29 @@ print 'Generating temp table with new dist key....'
 cur.execute(ddl)
 
 print 'Copying data over from original table'
+unloadstatement = '''
+UNLOAD (
+'SELECT * FROM %(tablename)s'
+)
+TO 's3://%(bucket_name)s/jl/unload/%(tablename)s_' 
+CREDENTIALS
+'aws_access_key_id=%(access_key_id)s;aws_secret_access_key=%(secret_access_key)s'
+manifest 
+delimiter '|';
+'''%parameters
+cur.execute(unloadstatement)
+
+loadstatement = '''
+COPY %(tablename)s_temp from 's3://%(bucket_name)s/jl/unload/%(tablename)s_manifest'
+CREDENTIALS
+'aws_access_key_id=%(access_key_id)s;aws_secret_access_key=%(secret_access_key)s'
+manifest 
+delimiter '|';
+'''%parameters
+cur.execute(loadstatement)
+
+con.commit()
+
 copystatement = '''
 INSERT INTO %(schema)s.%(tablename)s_temp
 SELECT * FROM %(schema)s.%(tablename)s;
